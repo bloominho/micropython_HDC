@@ -688,7 +688,8 @@ static void mp_machine_soft_i2c_init(mp_obj_base_t *self_in, size_t n_args, cons
 
 static mp_obj_t mp_machine_soft_i2c_make_new(const mp_obj_type_t *type, size_t n_args, size_t n_kw, const mp_obj_t *args) {
     // create new soft I2C object
-    machine_i2c_obj_t *self = mp_obj_malloc(machine_i2c_obj_t, &mp_machine_soft_i2c_type);
+    machine_i2c_obj_t *self = mp_obj_malloc(machine_i2c_obj_t, type);
+    // machine_i2c_obj_t *self = mp_obj_malloc(machine_i2c_obj_t, &mp_machine_soft_i2c_type);
     mp_map_t kw_args;
     mp_map_init_fixed_table(&kw_args, n_kw, args + n_args);
     mp_machine_soft_i2c_init(&self->base, n_args, args, &kw_args);
@@ -731,6 +732,151 @@ static const mp_machine_i2c_p_t mp_machine_soft_i2c_p = {
     .transfer = mp_machine_soft_i2c_transfer,
 };
 
+// return value:
+//    0 - success
+//   <0 - error, with errno being the negative of the return value
+static int mp_hal_i2c_htc_read_byte(machine_i2c_obj_t *self, uint8_t *val, int nack) {
+    mp_hal_i2c_delay(self);
+    mp_hal_i2c_scl_low(self);
+    mp_hal_i2c_delay(self);
+
+    uint8_t data = 0;
+    for (int i = 7; i >= 0; i--) {
+        int ret = mp_hal_i2c_scl_release(self);
+        if (ret != 0) {
+            return ret;
+        }
+        data = (data << 1) | mp_hal_i2c_sda_read(self);
+        mp_hal_i2c_scl_low(self);
+        mp_hal_i2c_delay(self);
+    }
+    *val = data;
+
+    // send ack/nack bit
+    if (!nack) {
+        mp_hal_i2c_sda_low(self);
+    }
+    mp_hal_i2c_delay(self);
+    int ret = mp_hal_i2c_scl_release(self);
+    if (ret != 0) {
+        mp_hal_i2c_sda_release(self);
+        return ret;
+    }
+    mp_hal_i2c_scl_low(self);
+    mp_hal_i2c_sda_release(self);
+
+    return 0; // success
+}
+
+// return value:
+//    0 - byte written and ack received
+//    1 - byte written and nack received
+//   <0 - error, with errno being the negative of the return value
+static int mp_hal_i2c_htc_write_byte(machine_i2c_obj_t *self, uint8_t val) {
+    mp_hal_i2c_delay(self);
+    mp_hal_i2c_scl_low(self);
+
+    for (int i = 7; i >= 0; i--) {
+        if ((val >> i) & 1) {
+            mp_hal_i2c_sda_release(self);
+        } else {
+            mp_hal_i2c_sda_low(self);
+        }
+        mp_hal_i2c_delay(self);
+        int ret = mp_hal_i2c_scl_release(self);
+        if (ret != 0) {
+            mp_hal_i2c_sda_release(self);
+            return ret;
+        }
+        mp_hal_i2c_scl_low(self);
+    }
+
+    mp_hal_i2c_sda_release(self);
+    mp_hal_i2c_delay(self);
+    int ret = mp_hal_i2c_scl_release(self);
+    if (ret != 0) {
+        return ret;
+    }
+
+    int ack = mp_hal_i2c_sda_read(self);
+    mp_hal_i2c_delay(self);
+    mp_hal_i2c_scl_low(self);
+
+    return ack;
+}
+
+// return value:
+//  >=0 - success; for read it's 0, for write it's number of acks received
+//   <0 - error, with errno being the negative of the return value
+int mp_machine_soft_i2c_htc_transfer(mp_obj_base_t *self_in, uint16_t addr, size_t n, mp_machine_i2c_buf_t *bufs, unsigned int flags) {
+    mp_printf(&mp_plat_print, "[I2C HTC] mp_machine_soft_i2c_htc_transfer\n");
+
+    machine_i2c_obj_t *self = (machine_i2c_obj_t *)self_in;
+
+    // start the I2C transaction
+    int ret = mp_hal_i2c_start(self);
+    if (ret != 0) {
+        return ret;
+    }
+
+    // write the slave address
+    ret = mp_hal_i2c_write_byte(self, (addr << 1) | (flags & MP_MACHINE_I2C_FLAG_READ));
+    if (ret < 0) {
+        return ret;
+    } else if (ret != 0) {
+        // nack received, release the bus cleanly
+        mp_hal_i2c_stop(self);
+        return -MP_ENODEV;
+    }
+
+    int transfer_ret = 0;
+    for (; n--; ++bufs) {
+        size_t len = bufs->len;
+        uint8_t *buf = bufs->buf;
+        if (flags & MP_MACHINE_I2C_FLAG_READ) {
+            // read bytes from the slave into the given buffer(s)
+            while (len--) {
+                ret = mp_hal_i2c_htc_read_byte(self, buf++, (n | len) == 0);
+                if (ret != 0) {
+                    return ret;
+                }
+            }
+        } else {
+            // write bytes from the given buffer(s) to the slave
+            while (len--) {
+                ret = mp_hal_i2c_htc_write_byte(self, *buf++);
+                if (ret < 0) {
+                    return ret;
+                } else if (ret != 0) {
+                    // nack received, stop sending
+                    n = 0;
+                    break;
+                }
+                ++transfer_ret; // count the number of acks
+            }
+        }
+    }
+
+    // finish the I2C transaction
+    if (flags & MP_MACHINE_I2C_FLAG_STOP) {
+        ret = mp_hal_i2c_stop(self);
+        if (ret != 0) {
+            return ret;
+        }
+    }
+
+    return transfer_ret;
+}
+
+static const mp_machine_i2c_p_t mp_machine_soft_i2c_htc_p = {
+    .init = mp_machine_soft_i2c_init,
+    .start = (int (*)(mp_obj_base_t *))mp_hal_i2c_start,
+    .stop = (int (*)(mp_obj_base_t *))mp_hal_i2c_stop,
+    .read = mp_machine_soft_i2c_read,
+    .write = mp_machine_soft_i2c_write,
+    .transfer = mp_machine_soft_i2c_htc_transfer,
+};
+
 MP_DEFINE_CONST_OBJ_TYPE(
     mp_machine_soft_i2c_type,
     MP_QSTR_SoftI2C,
@@ -738,6 +884,17 @@ MP_DEFINE_CONST_OBJ_TYPE(
     make_new, mp_machine_soft_i2c_make_new,
     print, mp_machine_soft_i2c_print,
     protocol, &mp_machine_soft_i2c_p,
+    locals_dict, &mp_machine_i2c_locals_dict
+    );
+
+
+MP_DEFINE_CONST_OBJ_TYPE(
+    mp_machine_soft_i2c_htc_type,
+    MP_QSTR_SoftI2C_HTC,
+    MP_TYPE_FLAG_NONE,
+    make_new, mp_machine_soft_i2c_make_new,
+    print, mp_machine_soft_i2c_print,
+    protocol, &mp_machine_soft_i2c_htc_p,
     locals_dict, &mp_machine_i2c_locals_dict
     );
 

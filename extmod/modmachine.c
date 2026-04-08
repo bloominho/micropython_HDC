@@ -202,6 +202,9 @@ static const mp_rom_map_elem_t machine_module_globals_table[] = {
     #if MICROPY_PY_MACHINE_SOFTI2C
     { MP_ROM_QSTR(MP_QSTR_SoftI2C), MP_ROM_PTR(&mp_machine_soft_i2c_type) },
     #endif
+    #if MICROPY_PY_MACHINE_SOFTI2C
+    { MP_ROM_QSTR(MP_QSTR_SoftI2C_HTC), MP_ROM_PTR(&mp_machine_soft_i2c_htc_type) },
+    #endif
     #if MICROPY_PY_MACHINE_SOFTSPI
     { MP_ROM_QSTR(MP_QSTR_SoftSPI), MP_ROM_PTR(&mp_machine_soft_spi_type) },
     #endif

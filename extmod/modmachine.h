@@ -225,6 +225,7 @@ extern const mp_obj_type_t machine_counter_type;
 
 #if MICROPY_PY_MACHINE_SOFTI2C
 extern const mp_obj_type_t mp_machine_soft_i2c_type;
+extern const mp_obj_type_t mp_machine_soft_i2c_htc_type;
 #endif
 #if MICROPY_PY_MACHINE_I2C || MICROPY_PY_MACHINE_SOFTI2C
 extern const mp_obj_dict_t mp_machine_i2c_locals_dict;
